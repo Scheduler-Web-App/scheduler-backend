@@ -3,6 +3,7 @@ var express = require('express');
 var path = require('path');
 var cookieParser = require('cookie-parser');
 var logger = require('morgan');
+const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const { Pool } = require('pg');
 require('dotenv').config();
@@ -25,7 +26,8 @@ const pool = new Pool({
 // Check database connection
 async function checkDbConnection() {
   try {
-    await pool.query('SELECT NOW()');  // This query is simple and effective for a connection check
+    var res = await pool.query('SELECT NOW()');  // This query is simple and effective for a connection check
+    console.log(`Current DB time: ${res.rows[0].now}`);
     console.log('Connected to the database successfully!');
   } catch (err) {
     console.error('Unable to connect to the database:', err);
@@ -45,8 +47,26 @@ app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.use('/', indexRouter);
-app.use('/users', usersRouter);
+
+// Helper function to generate JWT
+function generateToken(user) {
+  return jwt.sign({ account_email: user.account_email }, process.env.JWT_SECRET, { expiresIn: '24h' });
+}
+
+// Middleware to authenticate and verify token
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (token == null) return res.sendStatus(401); // if no token, return unauthorized
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403); // if token is not valid, return forbidden
+    req.user = user;
+    next();
+  });
+}
+
 
 // Signup Route
 app.post('/signup', async (req, res) => {
@@ -65,6 +85,7 @@ app.post('/signup', async (req, res) => {
 });
 
 // Signin Route
+// Modify the signin route to issue a JWT on successful login
 app.post('/signin', async (req, res) => {
   const { account_email, pin } = req.body;
   try {
@@ -73,7 +94,8 @@ app.post('/signin', async (req, res) => {
       const user = result.rows[0];
       const isValid = await bcrypt.compare(pin, user.pin);
       if (isValid) {
-        res.json({ message: "Authentication successful", user: user.account_email });
+        const token = generateToken(user); // Generate token
+        res.json({ message: "Authentication successful", token: token }); // Send token to client
       } else {
         res.status(401).json({ message: "Invalid email or pin" });
       }
@@ -85,6 +107,12 @@ app.post('/signin', async (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
+
+// Use the authenticateToken middleware in your schedulerItemsRouter
+const schedulerItemsRouter = require('./routes/schedulerItemsRouter')(pool, authenticateToken);
+app.use('/scheduler-items', authenticateToken, schedulerItemsRouter); // Protect this router with JWT middleware
+
 
 // catch 404 and forward to error handler
 app.use(function(req, res, next) {
